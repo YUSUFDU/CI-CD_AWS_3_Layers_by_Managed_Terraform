@@ -129,7 +129,7 @@ This will provision all AWS resources and deploy infrastructure.
 
 ## Contact
 
-For questions or support, please contact: y.duymac@gmail.com
+For questions or support, please contact: https://www.linkedin.com/in/yusuf-duyma%C3%A7-74a9811a2
 
 
 
