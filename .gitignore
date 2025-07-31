@@ -1,0 +1,14 @@
+# Terraform state dosyaları
+terraform.tfstate
+terraform.tfstate.backup
+
+# Crash log dosyaları
+crash.log
+
+# Paketlenmiş Lambda zip dosyaları
+*.zip
+
+# IDE ve sistem dosyaları
+.vscode/
+*.swp
+.DS_Store

@@ -1,0 +1,120 @@
+name: Terraform & EKS Deploy
+
+on:
+  push:
+    branches:
+      - dev
+      - test
+  workflow_dispatch:   # manuel tetikleme sadece prod için
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set Environment Context
+        id: env
+        run: |
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "ENV=prod" >> $GITHUB_ENV
+            echo "BACKEND_CONFIG=backend-prod.tfvars" >> $GITHUB_ENV
+            echo "ECR_REPO=${{ secrets.ECR_REPO_PROD }}" >> $GITHUB_ENV
+          elif [[ "${{ github.ref_name }}" == "test" ]]; then
+            echo "ENV=test" >> $GITHUB_ENV
+            echo "BACKEND_CONFIG=backend-test.tfvars" >> $GITHUB_ENV
+            echo "ECR_REPO=${{ secrets.ECR_REPO_TEST }}" >> $GITHUB_ENV
+          else
+            echo "ENV=dev" >> $GITHUB_ENV
+            echo "BACKEND_CONFIG=backend-dev.tfvars" >> $GITHUB_ENV
+            echo "ECR_REPO=${{ secrets.ECR_REPO_DEV }}" >> $GITHUB_ENV
+          fi
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init -backend-config=${{ env.BACKEND_CONFIG }}
+
+      - name: Terraform Plan
+        run: terraform plan -var-file="${{ env.ENV }}.tfvars"
+
+      - name: Terraform Apply
+        run: |
+          if [[ "${ENV}" == "prod" ]]; then
+            echo "Prod environment detected. Skipping auto apply. Please trigger manually via workflow_dispatch."
+            exit 1
+          else
+            terraform apply -var-file="${{ env.ENV }}.tfvars" -auto-approve
+          fi
+
+      - name: Docker Login to ECR
+        run: aws ecr get-login-password | docker login --username AWS --password-stdin ${{ env.ECR_REPO }}
+
+      - name: Build & Push Docker Image
+        run: |
+          docker build -t ${{ env.ECR_REPO }}:${{ env.ENV }} .
+          docker push ${{ env.ECR_REPO }}:${{ env.ENV }}
+
+      - name: Deploy to EKS
+        run: |
+          sed "s/:main/:${{ env.ENV }}/g" k8s/deployment.yaml > k8s/deployment-${{ env.ENV }}.yaml
+          kubectl apply -f k8s/deployment-${{ env.ENV }}.yaml
+          kubectl rollout status deployment example-app
+
+  manual-prod-apply:
+    if: github.event_name == 'workflow_dispatch'
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set prod env variables
+        run: |
+          echo "ENV=prod" >> $GITHUB_ENV
+          echo "BACKEND_CONFIG=backend-prod.tfvars" >> $GITHUB_ENV
+          echo "ECR_REPO=${{ secrets.ECR_REPO_PROD }}" >> $GITHUB_ENV
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init for prod
+        run: terraform init -backend-config=${{ env.BACKEND_CONFIG }}
+
+      - name: Terraform Apply for prod
+        run: terraform apply -var-file="${{ env.ENV }}.tfvars" -auto-approve
+
+      - name: Docker Login to ECR (prod)
+        run: aws ecr get-login-password | docker login --username AWS --password-stdin ${{ env.ECR_REPO }}
+
+      - name: Build & Push Docker Image (prod)
+        run: |
+          docker build -t ${{ env.ECR_REPO }}:prod .
+          docker push ${{ env.ECR_REPO }}:prod
+
+      - name: Deploy to EKS (prod)
+        run: |
+          sed "s/:main/:prod/g" k8s/deployment.yaml > k8s/deployment-prod.yaml
+          kubectl apply -f k8s/deployment-prod.yaml
+          kubectl rollout status deployment example-app
+
+      - name: Rollback if Failure (prod)
+        if: failure()
+        run: kubectl rollout undo deployment example-app
